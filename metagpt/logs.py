@@ -150,4 +150,9 @@ _get_human_input = input  # get human input from console by default
 
 def _llm_stream_log(msg):
     if _print_level in ["INFO"]:
-        print(msg, end="")
+        try:
+            print(msg, end="")
+        except UnicodeEncodeError:
+            encoding = sys.stdout.encoding or "utf-8"
+            safe_msg = msg.encode(encoding, errors="replace").decode(encoding, errors="replace")
+            print(safe_msg, end="")

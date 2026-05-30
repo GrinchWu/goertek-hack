@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+import os
 from pathlib import Path
 
 import typer
@@ -27,39 +28,45 @@ def generate_repo(
 ):
     """Run the startup logic. Can be called from CLI or other Python scripts."""
     from metagpt.config2 import config
+    from metagpt.configs.llm_config import LLMConfig, LLMType
     from metagpt.context import Context
     from metagpt.roles import (
         Architect,
-        DataAnalyst,
-        Engineer2,
+        Engineer,
         ProductManager,
-        TeamLeader,
+        ProjectManager,
+        QaEngineer,
     )
     from metagpt.team import Team
+    from metagpt.utils.full_chain_artifacts import init_from_context
 
+    idea, requirement_source, requirement_name = _load_requirement(idea)
     config.update_via_cli(project_path, project_name, inc, reqa_file, max_auto_summarize_code)
+    _update_llm_from_env(config, LLMConfig, LLMType)
     ctx = Context(config=config)
+    batch_id = project_name or config.project_name or _make_batch_id(requirement_name)
+    artifact_root = Path(os.getenv("METAGPT_FULL_CHAIN_ROOT", Path.cwd()))
+    artifacts = init_from_context(
+        ctx,
+        root=artifact_root,
+        batch_id=batch_id,
+        product_spec_name=requirement_name,
+        original_path=requirement_source,
+        content=idea,
+    )
 
     if not recover_path:
-        company = Team(context=ctx)
+        company = Team(context=ctx, use_mgx=False)
         company.hire(
             [
-                TeamLeader(),
-                ProductManager(),
-                Architect(),
-                Engineer2(),
-                # ProjectManager(),
-                DataAnalyst(),
+                ProductManager(use_fixed_sop=True),
+                Architect(use_fixed_sop=True),
+                ProjectManager(use_fixed_sop=True),
+                Engineer(n_borg=5, use_code_review=code_review),
+                QaEngineer(),
             ]
         )
-
-        # if implement or code_review:
-        #     company.hire([Engineer(n_borg=5, use_code_review=code_review)])
-        #
-        # if run_tests:
-        #     company.hire([QaEngineer()])
-        #     if n_round < 8:
-        #         n_round = 8  # If `--run-tests` is enabled, at least 8 rounds are required to run all QA actions.
+        n_round = max(n_round, 8)
     else:
         stg_path = Path(recover_path)
         if not stg_path.exists() or not str(stg_path).endswith("team"):
@@ -69,9 +76,44 @@ def generate_repo(
         idea = company.idea
 
     company.invest(investment)
-    asyncio.run(company.run(n_round=n_round, idea=idea))
+    try:
+        asyncio.run(company.run(n_round=n_round, idea=idea))
+    except Exception as exc:
+        artifacts.finalize_from_project(ctx.kwargs.get("project_path"), error=str(exc))
+        raise
 
-    return ctx.kwargs.get("project_path")
+    project_path = ctx.kwargs.get("project_path")
+    artifacts.finalize_from_project(project_path)
+    return project_path
+
+
+def _load_requirement(idea: str) -> tuple[str, str, str]:
+    path = Path(str(idea))
+    if path.exists() and path.is_file():
+        return path.read_text(encoding="utf-8"), str(path.resolve()), path.name
+    return str(idea), "", "inline_requirement.md"
+
+
+def _make_batch_id(requirement_name: str) -> str:
+    stem = Path(requirement_name).stem or "metagpt-project"
+    safe = "".join(ch if ch.isalnum() else "-" for ch in stem).strip("-")[:40] or "metagpt-project"
+    return f"{safe}-{Path.cwd().name}"
+
+
+def _update_llm_from_env(config, llm_config_cls, llm_type_cls) -> None:
+    api_key = os.getenv("METAGPT_API_KEY") or os.getenv("AGENTDEV_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("METAGPT_BASE_URL") or os.getenv("AGENTDEV_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+    model = os.getenv("METAGPT_MODEL") or os.getenv("AGENTDEV_MODEL") or os.getenv("OPENAI_MODEL")
+    max_token = os.getenv("METAGPT_MAX_TOKEN") or os.getenv("AGENTDEV_MAX_TOKEN") or os.getenv("OPENAI_MAX_TOKEN")
+    if not any([api_key, base_url, model, max_token]):
+        return
+    config.llm = llm_config_cls(
+        api_type=llm_type_cls.OPENAI,
+        api_key=api_key or config.llm.api_key,
+        base_url=base_url or config.llm.base_url,
+        model=model or config.llm.model,
+        max_token=int(max_token) if max_token else config.llm.max_token,
+    )
 
 
 @app.command("", help="Start a new project.")

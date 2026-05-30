@@ -301,6 +301,10 @@ class RoleZero(Role):
         )
 
     async def _react(self) -> Message:
+        if self.use_fixed_sop:
+            self.rc.max_react_loop = max(1, len(self.actions))
+            return await super()._react()
+
         # NOTE: Diff 1: Each time landing here means news is observed, set todo to allow news processing in _think
         self._set_state(0)
 

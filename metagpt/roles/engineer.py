@@ -59,6 +59,7 @@ from metagpt.utils.common import (
 )
 from metagpt.utils.git_repository import ChangeType
 from metagpt.utils.project_repo import ProjectRepo
+from metagpt.utils.full_chain_artifacts import node_completed, node_failed, node_started
 
 IS_PASS_PROMPT = """
 {context}
@@ -165,10 +166,17 @@ class Engineer(Role):
         return await self.rc.todo.run(self.rc.history)
 
     async def _act_write_code(self):
-        await self._act_sp_with_cr(review=self.use_code_review)
-        return AIMessage(
-            content="", cause_by=WriteCodeReview if self.use_code_review else WriteCode, send_to=MESSAGE_ROUTE_TO_SELF
-        )
+        node_started(self.context, "code_generation")
+        try:
+            await self._act_sp_with_cr(review=self.use_code_review)
+            outputs = [str(self.repo.srcs.workdir / i) for i in self.repo.srcs.changed_files.keys()]
+            node_completed(self.context, "code_generation", outputs)
+            return AIMessage(
+                content="", cause_by=WriteCodeReview if self.use_code_review else WriteCode, send_to=MESSAGE_ROUTE_TO_SELF
+            )
+        except Exception as exc:
+            node_failed(self.context, "code_generation", str(exc))
+            raise
 
     async def _act_summarize(self):
         tasks = []

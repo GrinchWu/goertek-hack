@@ -15,7 +15,6 @@ from metagpt.roles.role import RoleReactMode
 from metagpt.tools.libs.browser import Browser
 from metagpt.tools.libs.editor import Editor
 from metagpt.utils.common import any_to_name, any_to_str, tool2name
-from metagpt.utils.git_repository import GitRepository
 
 
 class ProductManager(RoleZero):
@@ -55,10 +54,4 @@ class ProductManager(RoleZero):
         if not self.use_fixed_sop:
             return await super()._think()
 
-        if GitRepository.is_git_dir(self.config.project_path) and not self.config.git_reinit:
-            self._set_state(1)
-        else:
-            self._set_state(0)
-            self.config.git_reinit = False
-            self.todo_action = any_to_name(WritePRD)
-        return bool(self.rc.todo)
+        return await super()._think()

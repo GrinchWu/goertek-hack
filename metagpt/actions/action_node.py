@@ -425,6 +425,45 @@ class ActionNode:
         stop=stop_after_attempt(6),
         after=general_after_log(logger),
     )
+    async def _aask_json_text(
+        self,
+        prompt: str,
+        system_msgs: Optional[list[str]] = None,
+        images: Optional[Union[str, list[str]]] = None,
+        timeout=USE_CONFIG_TIMEOUT,
+    ) -> str:
+        """Ask for JSON with non-streaming output and OpenAI JSON mode when available."""
+        llm = self.llm
+        if system_msgs:
+            messages = llm._system_msgs(system_msgs)
+        else:
+            messages = [llm._default_system_msg()]
+        if not llm.use_system_prompt:
+            messages = []
+        messages.append(llm._user_msg(prompt, images=images))
+        messages = llm.compress_messages(messages, compress_type=llm.config.compress_type)
+
+        try:
+            return await llm.acompletion_text(
+                messages,
+                stream=False,
+                timeout=llm.get_timeout(timeout),
+                response_format={"type": "json_object"},
+            )
+        except TypeError:
+            return await llm.acompletion_text(messages, stream=False, timeout=llm.get_timeout(timeout))
+        except Exception as exc:
+            text = str(exc)
+            if "response_format" not in text and "json_object" not in text:
+                raise
+            logger.warning(f"JSON mode is not accepted by the provider, fallback to normal JSON prompt: {exc}")
+            return await llm.acompletion_text(messages, stream=False, timeout=llm.get_timeout(timeout))
+
+    @retry(
+        wait=wait_random_exponential(min=1, max=20),
+        stop=stop_after_attempt(6),
+        after=general_after_log(logger),
+    )
     async def _aask_v1(
         self,
         prompt: str,
@@ -436,7 +475,10 @@ class ActionNode:
         timeout=USE_CONFIG_TIMEOUT,
     ) -> (str, BaseModel):
         """Use ActionOutput to wrap the output of aask"""
-        content = await self.llm.aask(prompt, system_msgs, images=images, timeout=timeout)
+        if schema == "json":
+            content = await self._aask_json_text(prompt, system_msgs, images=images, timeout=timeout)
+        else:
+            content = await self.llm.aask(prompt, system_msgs, images=images, timeout=timeout)
         logger.debug(f"llm raw output:\n{content}")
         output_class = self.create_model_class(output_class_name, output_data_mapping)
 

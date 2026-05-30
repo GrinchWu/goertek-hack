@@ -39,6 +39,7 @@ from metagpt.utils.common import (
 from metagpt.utils.mermaid import mermaid_to_file
 from metagpt.utils.project_repo import ProjectRepo
 from metagpt.utils.report import DocsReporter, GalleryReporter
+from metagpt.utils.full_chain_artifacts import node_completed, node_failed, node_started
 
 NEW_REQ_TEMPLATE = """
 ### Legacy Content
@@ -126,53 +127,64 @@ class WriteDesign(Action):
             >>> print(result)
             System Design filename: "/absolute/path/to/snake_game/docs/system_design_new.json"
         """
-        if not with_messages:
-            return await self._execute_api(
-                user_requirement=user_requirement,
-                prd_filename=prd_filename,
-                legacy_design_filename=legacy_design_filename,
-                extra_info=extra_info,
-                output_pathname=output_pathname,
+        node_started(self.context, "design")
+        try:
+            if not with_messages:
+                result = await self._execute_api(
+                    user_requirement=user_requirement,
+                    prd_filename=prd_filename,
+                    legacy_design_filename=legacy_design_filename,
+                    extra_info=extra_info,
+                    output_pathname=output_pathname,
+                )
+                node_completed(self.context, "design", [output_pathname] if output_pathname else [])
+                return result
+
+            self.input_args = with_messages[-1].instruct_content
+            self.repo = ProjectRepo(self.input_args.project_path)
+            changed_prds = self.input_args.changed_prd_filenames
+            changed_system_designs = [
+                str(self.repo.docs.system_design.workdir / i)
+                for i in list(self.repo.docs.system_design.changed_files.keys())
+            ]
+
+            # For those PRDs and design documents that have undergone changes, regenerate the design content.
+            changed_files = Documents()
+            for filename in changed_prds:
+                doc = await self._update_system_design(filename=filename)
+                changed_files.docs[filename] = doc
+
+            for filename in changed_system_designs:
+                if filename in changed_files.docs:
+                    continue
+                doc = await self._update_system_design(filename=filename)
+                changed_files.docs[filename] = doc
+            if not changed_files.docs:
+                logger.info("Nothing has changed.")
+            # Wait until all files under `docs/system_designs/` are processed before sending the publish message,
+            # leaving room for global optimization in subsequent steps.
+            kvs = self.input_args.model_dump()
+            kvs["changed_system_design_filenames"] = [
+                str(self.repo.docs.system_design.workdir / i)
+                for i in list(self.repo.docs.system_design.changed_files.keys())
+            ]
+            outputs = kvs["changed_system_design_filenames"]
+            outputs += [str(self.repo.resources.data_api_design.workdir / i) for i in self.repo.resources.data_api_design.changed_files.keys()]
+            outputs += [str(self.repo.resources.seq_flow.workdir / i) for i in self.repo.resources.seq_flow.changed_files.keys()]
+            node_completed(self.context, "design", outputs)
+            return AIMessage(
+                content="Designing is complete. "
+                + "\n".join(
+                    list(self.repo.docs.system_design.changed_files.keys())
+                    + list(self.repo.resources.data_api_design.changed_files.keys())
+                    + list(self.repo.resources.seq_flow.changed_files.keys())
+                ),
+                instruct_content=AIMessage.create_instruct_value(kvs=kvs, class_name="WriteDesignOutput"),
+                cause_by=self,
             )
-
-        self.input_args = with_messages[-1].instruct_content
-        self.repo = ProjectRepo(self.input_args.project_path)
-        changed_prds = self.input_args.changed_prd_filenames
-        changed_system_designs = [
-            str(self.repo.docs.system_design.workdir / i)
-            for i in list(self.repo.docs.system_design.changed_files.keys())
-        ]
-
-        # For those PRDs and design documents that have undergone changes, regenerate the design content.
-        changed_files = Documents()
-        for filename in changed_prds:
-            doc = await self._update_system_design(filename=filename)
-            changed_files.docs[filename] = doc
-
-        for filename in changed_system_designs:
-            if filename in changed_files.docs:
-                continue
-            doc = await self._update_system_design(filename=filename)
-            changed_files.docs[filename] = doc
-        if not changed_files.docs:
-            logger.info("Nothing has changed.")
-        # Wait until all files under `docs/system_designs/` are processed before sending the publish message,
-        # leaving room for global optimization in subsequent steps.
-        kvs = self.input_args.model_dump()
-        kvs["changed_system_design_filenames"] = [
-            str(self.repo.docs.system_design.workdir / i)
-            for i in list(self.repo.docs.system_design.changed_files.keys())
-        ]
-        return AIMessage(
-            content="Designing is complete. "
-            + "\n".join(
-                list(self.repo.docs.system_design.changed_files.keys())
-                + list(self.repo.resources.data_api_design.changed_files.keys())
-                + list(self.repo.resources.seq_flow.changed_files.keys())
-            ),
-            instruct_content=AIMessage.create_instruct_value(kvs=kvs, class_name="WriteDesignOutput"),
-            cause_by=self,
-        )
+        except Exception as exc:
+            node_failed(self.context, "design", str(exc))
+            raise
 
     async def _new_system_design(self, context):
         node = await DESIGN_API_NODE.fill(req=context, llm=self.llm, schema=self.prompt_schema)

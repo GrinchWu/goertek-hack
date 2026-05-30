@@ -386,7 +386,18 @@ class Message(BaseModel):
         instructions = ['Lists all the resources contained in the "Original Requirement".', return_format]
         rsp = await llm.aask(msg=content, system_msgs=instructions)
         json_data = CodeParser.parse_code(text=rsp, lang="json")
-        m = json.loads(json_data)
+        try:
+            m = json.loads(json_data)
+        except JSONDecodeError as exc:
+            repair_prompt = (
+                "Fix the following text into one valid JSON object. Return JSON only, without markdown fences. "
+                "Do not add or remove keys; escape any double quotes inside string values.\n\n"
+                f"JSON parse error: {exc}\n\n"
+                f"Text:\n{json_data or rsp}"
+            )
+            repaired = await llm.aask(msg=repair_prompt)
+            repaired_json = CodeParser.parse_code(text=repaired, lang="json") or repaired
+            m = json.loads(repaired_json)
         m["resources"] = [Resource(**i) for i in m.get("resources", [])]
         return m
 

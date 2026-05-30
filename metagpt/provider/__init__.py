@@ -18,7 +18,6 @@ from metagpt.provider.qianfan_api import QianFanLLM
 from metagpt.provider.dashscope_api import DashScopeLLM
 from metagpt.provider.anthropic_api import AnthropicLLM
 from metagpt.provider.bedrock_api import BedrockLLM
-from metagpt.provider.ark_api import ArkLLM
 from metagpt.provider.openrouter_reasoning import OpenrouterReasoningLLM
 
 __all__ = [
@@ -34,6 +33,13 @@ __all__ = [
     "DashScopeLLM",
     "AnthropicLLM",
     "BedrockLLM",
-    "ArkLLM",
     "OpenrouterReasoningLLM",
 ]
+
+try:
+    from metagpt.provider.ark_api import ArkLLM
+
+    __all__.append("ArkLLM")
+except ModuleNotFoundError as exc:
+    if exc.name != "volcenginesdkarkruntime":
+        raise

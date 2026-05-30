@@ -119,6 +119,9 @@ class Config(CLIParams, YamlModel):
         if reload or default_config_paths not in _CONFIG_CACHE:
             dicts = [dict(os.environ), *(Config.read_yaml(path) for path in default_config_paths), kwargs]
             final = merge_dict(dicts)
+            env_llm = read_llm_env()
+            if env_llm:
+                final["llm"] = {**final.get("llm", {}), **env_llm}
             _CONFIG_CACHE[default_config_paths] = Config(**final)
         return _CONFIG_CACHE[default_config_paths]
 
@@ -176,6 +179,25 @@ def merge_dict(dicts: Iterable[Dict]) -> Dict:
     for dictionary in dicts:
         result.update(dictionary)
     return result
+
+
+def read_llm_env() -> Dict:
+    api_key = os.getenv("METAGPT_API_KEY") or os.getenv("AGENTDEV_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("METAGPT_BASE_URL") or os.getenv("AGENTDEV_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+    model = os.getenv("METAGPT_MODEL") or os.getenv("AGENTDEV_MODEL") or os.getenv("OPENAI_MODEL")
+    max_token = os.getenv("METAGPT_MAX_TOKEN") or os.getenv("AGENTDEV_MAX_TOKEN") or os.getenv("OPENAI_MAX_TOKEN")
+    if not any([api_key, base_url, model, max_token]):
+        return {}
+    data = {"api_type": "openai"}
+    if api_key:
+        data["api_key"] = api_key
+    if base_url:
+        data["base_url"] = base_url
+    if model:
+        data["model"] = model
+    if max_token:
+        data["max_token"] = int(max_token)
+    return data
 
 
 _CONFIG_CACHE = {}

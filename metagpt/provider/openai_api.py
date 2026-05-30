@@ -89,9 +89,9 @@ class OpenAILLM(BaseLLM):
 
         return params
 
-    async def _achat_completion_stream(self, messages: list[dict], timeout=USE_CONFIG_TIMEOUT) -> str:
+    async def _achat_completion_stream(self, messages: list[dict], timeout=USE_CONFIG_TIMEOUT, **extra_kwargs) -> str:
         response: AsyncStream[ChatCompletionChunk] = await self.aclient.chat.completions.create(
-            **self._cons_kwargs(messages, timeout=self.get_timeout(timeout)), stream=True
+            **self._cons_kwargs(messages, timeout=self.get_timeout(timeout), **extra_kwargs), stream=True
         )
         usage = None
         collected_messages = []
@@ -153,8 +153,8 @@ class OpenAILLM(BaseLLM):
             kwargs.update(extra_kwargs)
         return kwargs
 
-    async def _achat_completion(self, messages: list[dict], timeout=USE_CONFIG_TIMEOUT) -> ChatCompletion:
-        kwargs = self._cons_kwargs(messages, timeout=self.get_timeout(timeout))
+    async def _achat_completion(self, messages: list[dict], timeout=USE_CONFIG_TIMEOUT, **extra_kwargs) -> ChatCompletion:
+        kwargs = self._cons_kwargs(messages, timeout=self.get_timeout(timeout), **extra_kwargs)
         rsp: ChatCompletion = await self.aclient.chat.completions.create(**kwargs)
         self._update_costs(rsp.usage)
         return rsp
@@ -169,12 +169,12 @@ class OpenAILLM(BaseLLM):
         retry=retry_if_exception_type(APIConnectionError),
         retry_error_callback=log_and_reraise,
     )
-    async def acompletion_text(self, messages: list[dict], stream=False, timeout=USE_CONFIG_TIMEOUT) -> str:
+    async def acompletion_text(self, messages: list[dict], stream=False, timeout=USE_CONFIG_TIMEOUT, **extra_kwargs) -> str:
         """when streaming, print each token in place."""
         if stream:
-            return await self._achat_completion_stream(messages, timeout=timeout)
+            return await self._achat_completion_stream(messages, timeout=timeout, **extra_kwargs)
 
-        rsp = await self._achat_completion(messages, timeout=self.get_timeout(timeout))
+        rsp = await self._achat_completion(messages, timeout=self.get_timeout(timeout), **extra_kwargs)
         return self.get_choice_text(rsp)
 
     async def _achat_completion_function(
