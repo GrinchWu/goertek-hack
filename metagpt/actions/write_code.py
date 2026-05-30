@@ -16,6 +16,7 @@
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +31,10 @@ from metagpt.schema import CodingContext, Document, RunCodeResult
 from metagpt.utils.common import CodeParser, get_markdown_code_block_type
 from metagpt.utils.project_repo import ProjectRepo
 from metagpt.utils.report import EditorReporter
+
+DEFAULT_MAX_LEGACY_CODE_FILES = 8
+DEFAULT_MAX_LEGACY_CODE_CHARS = 24000
+DEFAULT_MAX_SINGLE_LEGACY_FILE_CHARS = 6000
 
 PROMPT_TEMPLATE = """
 NOTICE
@@ -165,6 +170,77 @@ class WriteCode(Action):
         return coding_context
 
     @staticmethod
+    def _get_int_env(name: str, default: int) -> int:
+        value = os.getenv(name)
+        if not value:
+            return default
+        try:
+            parsed = int(value)
+        except ValueError:
+            logger.warning(f"Invalid {name}={value!r}, fallback to {default}")
+            return default
+        return parsed if parsed > 0 else default
+
+    @staticmethod
+    def _rank_legacy_file(filename: str, exclude: str) -> tuple[int, str]:
+        normalized = Path(filename).as_posix().lower()
+        target = Path(exclude).as_posix().lower()
+        target_parent = Path(target).parent.as_posix()
+        source_parent = Path(normalized).parent.as_posix()
+
+        if normalized == target:
+            return (0, normalized)
+        if source_parent == target_parent:
+            return (10, normalized)
+
+        shared_files = {
+            "package.json",
+            "vite.config.js",
+            "src/app.jsx",
+            "src/main.jsx",
+            "src/theme.js",
+            "src/services/api.js",
+            "server/index.js",
+            "server/database.js",
+        }
+        if normalized in shared_files:
+            return (20, normalized)
+
+        if target.startswith("server/") and normalized.startswith("server/"):
+            if "/models/" in normalized or "/routes/" in normalized or "/mock/" in normalized:
+                return (30, normalized)
+            return (40, normalized)
+
+        if target.startswith("src/") and normalized.startswith("src/"):
+            if "/services/" in normalized or "/hooks/" in normalized or "/components/" in normalized:
+                return (30, normalized)
+            return (40, normalized)
+
+        return (90, normalized)
+
+    @staticmethod
+    def _truncate_legacy_content(content: str, filename: str, max_chars: int) -> str:
+        if len(content) <= max_chars:
+            return content
+        head = max_chars // 2
+        tail = max_chars - head
+        return (
+            content[:head]
+            + f"\n\n... <MetaGPT omitted middle of {filename} to keep WriteCode prompt within budget> ...\n\n"
+            + content[-tail:]
+        )
+
+    @classmethod
+    def _select_legacy_files(cls, filenames: list[str], exclude: str, use_inc: bool) -> list[str]:
+        max_files = cls._get_int_env("METAGPT_MAX_LEGACY_CODE_FILES", DEFAULT_MAX_LEGACY_CODE_FILES)
+        unique_filenames = list(dict.fromkeys(filenames))
+        if use_inc and exclude in unique_filenames:
+            unique_filenames.remove(exclude)
+            unique_filenames.insert(0, exclude)
+        ranked = sorted(unique_filenames, key=lambda item: cls._rank_legacy_file(item, exclude))
+        return ranked[:max_files]
+
+    @staticmethod
     async def get_codes(task_doc: Document, exclude: str, project_repo: ProjectRepo, use_inc: bool = False) -> str:
         """
         Get codes for generating the exclude file in various scenarios.
@@ -185,10 +261,17 @@ class WriteCode(Action):
         m = json.loads(task_doc.content)
         code_filenames = m.get(TASK_LIST.key, []) if not use_inc else m.get(REFINED_TASK_LIST.key, [])
         codes = []
+        max_total_chars = WriteCode._get_int_env(
+            "METAGPT_MAX_LEGACY_CODE_CHARS", DEFAULT_MAX_LEGACY_CODE_CHARS
+        )
+        max_file_chars = WriteCode._get_int_env(
+            "METAGPT_MAX_SINGLE_LEGACY_FILE_CHARS", DEFAULT_MAX_SINGLE_LEGACY_FILE_CHARS
+        )
         src_file_repo = project_repo.srcs
         # Incremental development scenario
         if use_inc:
-            for filename in src_file_repo.all_files:
+            selected_filenames = WriteCode._select_legacy_files(src_file_repo.all_files, exclude, use_inc=True)
+            for filename in selected_filenames:
                 code_block_type = get_markdown_code_block_type(filename)
                 # Exclude the current file from the all code snippets
                 if filename == exclude:
@@ -201,8 +284,9 @@ class WriteCode(Action):
                     # If the file is in the src workspace, skip it
                     else:
                         continue
+                    content = WriteCode._truncate_legacy_content(doc.content, filename, max_file_chars)
                     codes.insert(
-                        0, f"### The name of file to rewrite: `{filename}`\n```{code_block_type}\n{doc.content}```\n"
+                        0, f"### The name of file to rewrite: `{filename}`\n```{code_block_type}\n{content}```\n"
                     )
                     logger.info(f"Prepare to rewrite `{filename}`")
                 # The code snippets are generated from the src workspace
@@ -211,11 +295,13 @@ class WriteCode(Action):
                     # If the file does not exist in the src workspace, skip it
                     if not doc:
                         continue
-                    codes.append(f"### File Name: `{filename}`\n```{code_block_type}\n{doc.content}```\n\n")
+                    content = WriteCode._truncate_legacy_content(doc.content, filename, max_file_chars)
+                    codes.append(f"### File Name: `{filename}`\n```{code_block_type}\n{content}```\n\n")
 
         # Normal scenario
         else:
-            for filename in code_filenames:
+            selected_filenames = WriteCode._select_legacy_files(code_filenames, exclude, use_inc=False)
+            for filename in selected_filenames:
                 # Exclude the current file to get the code snippets for generating the current file
                 if filename == exclude:
                     continue
@@ -223,6 +309,16 @@ class WriteCode(Action):
                 if not doc:
                     continue
                 code_block_type = get_markdown_code_block_type(filename)
-                codes.append(f"### File Name: `{filename}`\n```{code_block_type}\n{doc.content}```\n\n")
+                content = WriteCode._truncate_legacy_content(doc.content, filename, max_file_chars)
+                codes.append(f"### File Name: `{filename}`\n```{code_block_type}\n{content}```\n\n")
 
-        return "\n".join(codes)
+        joined = "\n".join(codes)
+        if len(joined) > max_total_chars:
+            logger.info(
+                f"Legacy code context for {exclude} trimmed from {len(joined)} to {max_total_chars} characters"
+            )
+            joined = joined[:max_total_chars] + "\n\n... <MetaGPT omitted remaining legacy files> ...\n"
+        logger.info(
+            f"Prepared {len(codes)} legacy code snippets for {exclude}, prompt code context chars={len(joined)}"
+        )
+        return joined

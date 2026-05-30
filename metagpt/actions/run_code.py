@@ -115,6 +115,8 @@ class RunCode(Action):
             logger.info("The command did not complete within the given timeout.")
             process.kill()  # Kill the process if it times out
             stdout, stderr = process.communicate()
+        if process.returncode:
+            stderr = stderr + f"\nProcess exited with code {process.returncode}".encode("utf-8")
         return stdout.decode("utf-8"), stderr.decode("utf-8")
 
     async def run(self, *args, **kwargs) -> RunCodeResult:

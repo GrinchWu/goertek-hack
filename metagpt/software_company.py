@@ -45,6 +45,8 @@ def generate_repo(
     _update_llm_from_env(config, LLMConfig, LLMType)
     ctx = Context(config=config)
     batch_id = project_name or config.project_name or _make_batch_id(requirement_name)
+    if not config.project_name:
+        config.project_name = batch_id
     artifact_root = Path(os.getenv("METAGPT_FULL_CHAIN_ROOT", Path.cwd()))
     artifacts = init_from_context(
         ctx,

@@ -18,6 +18,7 @@ from metagpt.logs import logger
 from metagpt.schema import RunCodeContext, RunCodeResult
 from metagpt.utils.common import CodeParser
 from metagpt.utils.project_repo import ProjectRepo
+from metagpt.actions.write_test import get_test_profile, normalize_test_code, sanitize_python_code
 
 PROMPT_TEMPLATE = """
 NOTICE
@@ -25,15 +26,16 @@ NOTICE
 2. Task: You received this message from another Development Engineer or QA engineer who ran or tested your code. 
 Based on the message, first, figure out your own role, i.e. Engineer or QaEngineer,
 then rewrite the development code or the test code based on your role, the error, and the summary, such that all bugs are fixed and the code performs well.
-Attention: Use '##' to split sections, not '#', and '## <SECTION_NAME>' SHOULD WRITE BEFORE the test case or script and triple quotes.
+Attention: Return raw code only for the one file that must be rewritten. Do not include markdown headings,
+explanations, or ``` fences.
 The message is as follows:
 # Legacy Code
-```python
+```{source_code_block_type}
 {code}
 ```
 ---
 # Unit Test Code
-```python
+```{test_code_block_type}
 {test_code}
 ```
 ---
@@ -43,7 +45,7 @@ The message is as follows:
 ```
 ---
 Now you should start rewriting the code:
-## file name of the code to rewrite: Write code with triple quote. Do your best to implement THIS IN ONLY ONE FILE.
+Write the corrected file content. Do your best to implement THIS IN ONLY ONE FILE. Return raw executable code only.
 """
 
 
@@ -69,9 +71,21 @@ class DebugError(Action):
         test_doc = await self.repo.tests.get(filename=self.i_context.test_filename)
         if not test_doc:
             return ""
-        prompt = PROMPT_TEMPLATE.format(code=code_doc.content, test_code=test_doc.content, logs=output_detail.stderr)
+        source_profile = get_test_profile(self.i_context.code_filename)
+        test_profile = get_test_profile(self.i_context.test_filename)
+        prompt = PROMPT_TEMPLATE.format(
+            code=code_doc.content,
+            test_code=test_doc.content,
+            logs=output_detail.stderr,
+            source_code_block_type=source_profile.code_block_type,
+            test_code_block_type=test_profile.code_block_type,
+        )
 
         rsp = await self._aask(prompt)
         code = CodeParser.parse_code(text=rsp)
 
-        return code
+        return normalize_test_code(
+            sanitize_python_code(code),
+            self.i_context.test_filename,
+            code_doc.root_relative_path.replace("\\", "/"),
+        )

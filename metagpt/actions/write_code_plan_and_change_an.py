@@ -30,98 +30,13 @@ DEVELOPMENT_PLAN = ActionNode(
 INCREMENTAL_CHANGE = ActionNode(
     key="Incremental Change",
     expected_type=List[str],
-    instruction="Write Incremental Change by making a code draft that how to implement incremental development "
-    "including detailed steps based on the context. Note: Track incremental changes using the marks `+` and `-` to "
-    "indicate additions and deletions, and ensure compliance with the output format of `git diff`",
+    instruction="Write a concise file-level incremental change summary based on the context. "
+    "Do NOT output complete source code, code blocks, or git diff patches. "
+    "Each item must be a short sentence with the target file path, change type, and change summary only. "
+    "The later WriteCode action will generate or rewrite each file.",
     example=[
-        '''```diff
---- Old/calculator.py
-+++ New/calculator.py
-
-class Calculator:
-         self.result = number1 + number2
-         return self.result
-
--    def sub(self, number1, number2) -> float:
-+    def subtract(self, number1: float, number2: float) -> float:
-+        """
-+        Subtracts the second number from the first and returns the result.
-+
-+        Args:
-+            number1 (float): The number to be subtracted from.
-+            number2 (float): The number to subtract.
-+
-+        Returns:
-+            float: The difference of number1 and number2.
-+        """
-+        self.result = number1 - number2
-+        return self.result
-+
-    def multiply(self, number1: float, number2: float) -> float:
--        pass
-+        """
-+        Multiplies two numbers and returns the result.
-+
-+        Args:
-+            number1 (float): The first number to multiply.
-+            number2 (float): The second number to multiply.
-+
-+        Returns:
-+            float: The product of number1 and number2.
-+        """
-+        self.result = number1 * number2
-+        return self.result
-+
-    def divide(self, number1: float, number2: float) -> float:
--        pass
-+        """
-+            ValueError: If the second number is zero.
-+        """
-+        if number2 == 0:
-+            raise ValueError('Cannot divide by zero')
-+        self.result = number1 / number2
-+        return self.result
-+
--    def reset_result(self):
-+    def clear(self):
-+        if self.result != 0.0:
-+            print("Result is not zero, clearing...")
-+        else:
-+            print("Result is already zero, no need to clear.")
-+
-         self.result = 0.0
-```''',
-        """```diff
---- Old/main.py
-+++ New/main.py
-
-def add_numbers():
-     result = calculator.add_numbers(num1, num2)
-     return jsonify({'result': result}), 200
-
--# TODO: Implement subtraction, multiplication, and division operations
-+@app.route('/subtract_numbers', methods=['POST'])
-+def subtract_numbers():
-+    data = request.get_json()
-+    num1 = data.get('num1', 0)
-+    num2 = data.get('num2', 0)
-+    result = calculator.subtract_numbers(num1, num2)
-+    return jsonify({'result': result}), 200
-+
-+@app.route('/multiply_numbers', methods=['POST'])
-+def multiply_numbers():
-+    data = request.get_json()
-+    num1 = data.get('num1', 0)
-+    num2 = data.get('num2', 0)
-+    try:
-+        result = calculator.divide_numbers(num1, num2)
-+    except ValueError as e:
-+        return jsonify({'error': str(e)}), 400
-+    return jsonify({'result': result}), 200
-+
- if __name__ == '__main__':
-     app.run()
-```""",
+        "calculator.py: rename subtraction method and add complete arithmetic operation behavior.",
+        "main.py: add API routes for subtraction, multiplication, and division with validation.",
     ],
 )
 
@@ -196,7 +111,7 @@ Role: You are a professional engineer; The main goal is to complete incremental 
 2. COMPLETE CODE: Your code will be part of the entire project, so please implement complete, reliable, reusable code snippets.
 3. Set default value: If there is any setting, ALWAYS SET A DEFAULT VALUE, ALWAYS USE STRONG TYPE AND EXPLICIT VARIABLE. AVOID circular import.
 4. Follow design: YOU MUST FOLLOW "Data structures and interfaces". DONT CHANGE ANY DESIGN. Do not use public member functions that do not exist in your design.
-5. Follow Code Plan And Change: If there is any "Incremental Change" that is marked by the git diff format with '+' and '-' symbols, or Legacy Code files contain "{filename} to be rewritten", you must merge it into the code file according to the "Development Plan". 
+5. Follow Code Plan And Change: If there is any "Incremental Change" summary, implement the relevant change for "{filename}" according to the "Development Plan".
 6. CAREFULLY CHECK THAT YOU DONT MISS ANY NECESSARY CLASS/FUNCTION IN THIS FILE.
 7. Before using a external variable/module, make sure you import it first.
 8. Write out EVERY CODE DETAIL, DON'T LEAVE TODO.
@@ -216,7 +131,7 @@ class WriteCodePlanAndChange(Action):
 
     async def run(self, *args, **kwargs):
         self.llm.system_prompt = "You are a professional software engineer, your primary responsibility is to "
-        "meticulously craft comprehensive incremental development plan and deliver detailed incremental change"
+        "craft concise incremental development plans and file-level change summaries without writing source code"
         prd_doc = await Document.load(filename=self.i_context.prd_filename)
         design_doc = await Document.load(filename=self.i_context.design_filename)
         task_doc = await Document.load(filename=self.i_context.task_filename)

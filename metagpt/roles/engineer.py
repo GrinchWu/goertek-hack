@@ -240,23 +240,28 @@ class Engineer(Role):
 
     async def _act_code_plan_and_change(self):
         """Write code plan and change that guides subsequent WriteCode and WriteCodeReview"""
-        node = await self.rc.todo.run()
-        code_plan_and_change = node.instruct_content.model_dump_json()
-        dependencies = {
-            REQUIREMENT_FILENAME,
-            str(Path(self.rc.todo.i_context.prd_filename).relative_to(self.repo.workdir)),
-            str(Path(self.rc.todo.i_context.design_filename).relative_to(self.repo.workdir)),
-            str(Path(self.rc.todo.i_context.task_filename).relative_to(self.repo.workdir)),
-        }
-        code_plan_and_change_filepath = Path(self.rc.todo.i_context.design_filename)
-        await self.repo.docs.code_plan_and_change.save(
-            filename=code_plan_and_change_filepath.name, content=code_plan_and_change, dependencies=dependencies
-        )
-        await self.repo.resources.code_plan_and_change.save(
-            filename=code_plan_and_change_filepath.with_suffix(".md").name,
-            content=node.content,
-            dependencies=dependencies,
-        )
+        node_started(self.context, "code_generation")
+        try:
+            node = await self.rc.todo.run()
+            code_plan_and_change = node.instruct_content.model_dump_json()
+            dependencies = {
+                REQUIREMENT_FILENAME,
+                str(Path(self.rc.todo.i_context.prd_filename).relative_to(self.repo.workdir)),
+                str(Path(self.rc.todo.i_context.design_filename).relative_to(self.repo.workdir)),
+                str(Path(self.rc.todo.i_context.task_filename).relative_to(self.repo.workdir)),
+            }
+            code_plan_and_change_filepath = Path(self.rc.todo.i_context.design_filename)
+            await self.repo.docs.code_plan_and_change.save(
+                filename=code_plan_and_change_filepath.name, content=code_plan_and_change, dependencies=dependencies
+            )
+            await self.repo.resources.code_plan_and_change.save(
+                filename=code_plan_and_change_filepath.with_suffix(".md").name,
+                content=node.content,
+                dependencies=dependencies,
+            )
+        except Exception as exc:
+            node_failed(self.context, "code_generation", str(exc))
+            raise
 
         return AIMessage(content="", cause_by=WriteCodePlanAndChange, send_to=MESSAGE_ROUTE_TO_SELF)
 

@@ -160,7 +160,8 @@ class FullChainArtifacts:
         node = data["nodes"][node_id]
         if status == "running":
             node["started_at"] = node["started_at"] or now_iso()
-            node["attempts"] += 1
+            if node["status"] != "running":
+                node["attempts"] += 1
             data["current_node"] = node_id
         if status in {"completed", "failed"}:
             node["ended_at"] = now_iso()
@@ -190,9 +191,10 @@ class FullChainArtifacts:
             src = _find_src_dir(project)
             if src:
                 output_files["code_generation"].extend(_safe_copytree(src, self.source_dir))
-            output_files["unit_test"].extend(_safe_copytree(project / "tests", self.tests_dir))
+            project_tests_dir = project / "tests"
+            output_files["unit_test"].extend(_safe_copytree(project_tests_dir, self.tests_dir))
             output_files["unit_test"].extend(_safe_copytree(project / "test_outputs", self.batch_dir / "单元测试" / "test_outputs"))
-            if src and not _has_meaningful_tests(self.tests_dir):
+            if src and not _has_meaningful_tests(project_tests_dir):
                 static_test = _write_static_project_test(self.root, self.source_dir, self.tests_dir)
                 if static_test:
                     output_files["unit_test"].append(static_test)
@@ -200,10 +202,13 @@ class FullChainArtifacts:
         data = _read_json(self.status_path, {})
         for node_id, files in output_files.items():
             node = data["nodes"][node_id]
+            completion_files = files
+            if node_id == "unit_test":
+                completion_files = [file for file in files if Path(file).name != "__init__.py"]
             if files:
                 existing = set(node.get("output_files", []))
                 node["output_files"] = sorted(existing | {self.relative(i) for i in files})
-            if files and node["status"] != "completed":
+            if completion_files and node["status"] != "completed":
                 node["status"] = "completed"
                 node["started_at"] = node["started_at"] or data["created_at"]
                 node["ended_at"] = node["ended_at"] or now_iso()

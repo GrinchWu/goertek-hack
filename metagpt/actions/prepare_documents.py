@@ -20,6 +20,18 @@ from metagpt.utils.file_repository import FileRepository
 from metagpt.utils.project_repo import ProjectRepo
 
 
+def _looks_like_project_path(value: str) -> bool:
+    """Return True only for values that look like explicit filesystem paths."""
+    value = str(value or "").strip()
+    if not value:
+        return False
+    lowered = value.lower()
+    if lowered.startswith("the project path") or lowered in {"none", "null", "n/a"}:
+        return False
+    path = Path(value)
+    return path.is_absolute() or value.startswith((".", "~")) or "/" in value or "\\" in value
+
+
 class PrepareDocuments(Action):
     """PrepareDocuments Action: initialize project folder and add new requirements to docs/requirements.txt."""
 
@@ -57,6 +69,9 @@ class PrepareDocuments(Action):
             args = await user_requirements[0].parse_resources(llm=self.llm, key_descriptions=self.key_descriptions)
             for k, v in args.items():
                 if not v or k in ["resources", "reason"]:
+                    continue
+                if k == "project_path" and not _looks_like_project_path(v):
+                    logger.info(f"ignore non-path project_path from requirement parser: {v}")
                     continue
                 self.context.kwargs.set(k, v)
                 logger.info(f"{k}={v}")

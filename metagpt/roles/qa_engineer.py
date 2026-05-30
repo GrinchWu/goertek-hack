@@ -14,6 +14,8 @@
 @Modified By: mashenquan, 2023-12-5. Enhance the workflow to navigate to WriteCode or QaEngineer based on the results
     of SummarizeCode.
 """
+import re
+from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -21,10 +23,11 @@ from pydantic import BaseModel, Field
 from metagpt.actions import DebugError, RunCode, UserRequirement, WriteTest
 from metagpt.actions.prepare_documents import PrepareDocuments
 from metagpt.actions.summarize_code import SummarizeCode
+from metagpt.actions.write_test import build_test_command, build_test_filename, is_testable_source
 from metagpt.const import MESSAGE_ROUTE_TO_NONE, MESSAGE_ROUTE_TO_SELF
 from metagpt.logs import logger
 from metagpt.roles import Role
-from metagpt.schema import AIMessage, Document, Message, RunCodeContext, TestingContext
+from metagpt.schema import AIMessage, Document, Message, RunCodeContext, RunCodeResult, TestingContext
 from metagpt.utils.common import (
     any_to_str,
     any_to_str_set,
@@ -60,6 +63,42 @@ class QaEngineer(Role):
         self._watch([SummarizeCode, WriteTest, RunCode, DebugError])
         self.test_round = 0
 
+    @staticmethod
+    def _is_run_result_passed(result: RunCodeResult) -> bool:
+        combined_output = f"{result.stdout}\n{result.stderr}"
+        if re.search(r"Ran \d+ tests? in [\d.]+s\s+OK", combined_output):
+            return True
+        if "# fail 0" in combined_output and "# pass " in combined_output:
+            return True
+        if result.stderr.strip() or "Traceback" in combined_output or "SyntaxError" in combined_output:
+            return False
+        return "PASS" in result.summary and "FAIL" not in result.summary
+
+    async def _collect_test_status(self) -> tuple[bool, list[str], list[str]]:
+        runnable_suffixes = {".py", ".js", ".mjs", ".cjs"}
+        test_files = [
+            filename
+            for filename in self.repo.tests.all_files
+            if Path(filename).suffix.lower() in runnable_suffixes and Path(filename).name != "__init__.py"
+        ]
+        if not test_files:
+            return False, [], ["no test files generated"]
+
+        output_files = []
+        failures = []
+        for test_filename in test_files:
+            output_filename = test_filename + ".json"
+            output_doc = await self.repo.test_outputs.get(filename=output_filename)
+            if not output_doc:
+                failures.append(f"{test_filename}: not run yet")
+                continue
+            output_files.append(str(self.repo.test_outputs.workdir / output_filename))
+            result = RunCodeResult.loads(output_doc.content)
+            if not self._is_run_result_passed(result):
+                first_error = (result.stderr or result.summary).strip().splitlines()
+                failures.append(f"{test_filename}: {first_error[0] if first_error else 'failed'}")
+        return not failures, output_files, failures
+
     async def _write_test(self, message: Message) -> None:
         node_started(self.context, "unit_test")
         reqa_file = self.context.kwargs.reqa_file or self.config.reqa_file
@@ -67,17 +106,16 @@ class QaEngineer(Role):
             changed_files = {reqa_file} if reqa_file else set(self.repo.srcs.changed_files.keys())
             for filename in changed_files:
                 # write tests
-                if not filename or "test" in filename:
+                if not filename or not is_testable_source(filename):
                     continue
                 code_doc = await self.repo.srcs.get(filename)
                 if not code_doc or not code_doc.content:
                     continue
-                if not code_doc.filename.endswith(".py"):
-                    continue
-                test_doc = await self.repo.tests.get("test_" + code_doc.filename)
+                test_filename = build_test_filename(code_doc.filename)
+                test_doc = await self.repo.tests.get(test_filename)
                 if not test_doc:
                     test_doc = Document(
-                        root_path=str(self.repo.tests.root_path), filename="test_" + code_doc.filename, content=""
+                        root_path=str(self.repo.tests.root_path), filename=test_filename, content=""
                     )
                 logger.info(f"Writing {test_doc.filename}..")
                 context = TestingContext(filename=test_doc.filename, test_doc=test_doc, code_doc=code_doc)
@@ -92,8 +130,9 @@ class QaEngineer(Role):
                     await reporter.async_report(self.repo.workdir / doc.root_relative_path, "path")
 
                 # prepare context for run tests in next round
+                run_command = build_test_command(context.test_doc.root_relative_path, context.code_doc.filename)
                 run_code_context = RunCodeContext(
-                    command=["python", context.test_doc.root_relative_path],
+                    command=run_command,
                     code_filename=context.code_doc.filename,
                     test_filename=context.test_doc.filename,
                     working_directory=str(self.repo.workdir),
@@ -103,8 +142,6 @@ class QaEngineer(Role):
                     AIMessage(content=run_code_context.model_dump_json(), cause_by=WriteTest, send_to=MESSAGE_ROUTE_TO_SELF)
                 )
 
-            outputs = [str(self.repo.tests.workdir / i) for i in self.repo.tests.changed_files.keys()]
-            node_completed(self.context, "unit_test", outputs)
             logger.info(f"Done {str(self.repo.tests.workdir)} generating.")
         except Exception as exc:
             node_failed(self.context, "unit_test", str(exc))
@@ -129,6 +166,8 @@ class QaEngineer(Role):
         )
         run_code_context.code = None
         run_code_context.test_code = None
+        if self._is_run_result_passed(result):
+            return
         # the recipient might be Engineer or myself
         recipient = parse_recipient(result.summary)
         mappings = {"Engineer": "Alex", "QaEngineer": "Edward"}
@@ -160,6 +199,8 @@ class QaEngineer(Role):
         code = await DebugError(
             i_context=run_code_context, repo=self.repo, input_args=self.input_args, context=self.context, llm=self.llm
         ).run()
+        if not code:
+            return
         await self.repo.tests.save(filename=run_code_context.test_filename, content=code)
         run_code_context.output = None
         self.publish_message(
@@ -170,6 +211,9 @@ class QaEngineer(Role):
         if self.input_args.project_path:
             await init_python_folder(self.repo.tests.workdir)
         if self.test_round > self.test_round_allowed:
+            passed, outputs, failures = await self._collect_test_status()
+            if not passed:
+                node_failed(self.context, "unit_test", "; ".join(failures[:5]))
             kvs = self.input_args.model_dump()
             kvs["changed_test_filenames"] = [
                 str(self.repo.tests.workdir / i) for i in list(self.repo.tests.changed_files.keys())
@@ -205,6 +249,15 @@ class QaEngineer(Role):
         kvs["changed_test_filenames"] = [
             str(self.repo.tests.workdir / i) for i in list(self.repo.tests.changed_files.keys())
         ]
+        passed, outputs, failures = await self._collect_test_status()
+        if passed:
+            node_completed(
+                self.context,
+                "unit_test",
+                [str(self.repo.tests.workdir / i) for i in self.repo.tests.all_files] + outputs,
+            )
+        elif failures:
+            logger.info(f"Unit tests still not passing: {failures[:5]}")
         return AIMessage(
             content=f"Round {self.test_round} of tests done",
             instruct_content=AIMessage.create_instruct_value(kvs=kvs, class_name="WriteTestOutput"),
