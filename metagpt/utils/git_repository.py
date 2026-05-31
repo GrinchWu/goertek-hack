@@ -104,7 +104,7 @@ class GitRepository:
         self._repository = Repo.init(path=Path(local_path))
 
         gitignore_filename = Path(local_path) / ".gitignore"
-        ignores = ["__pycache__", "*.pyc", ".vs"]
+        ignores = ["__pycache__", "*.pyc", ".vs", "node_modules/", "dist/", "package-lock.json"]
         with open(str(gitignore_filename), mode="w") as writer:
             writer.write("\n".join(ignores))
         self._repository.index.add([".gitignore"])
@@ -147,7 +147,15 @@ class GitRepository:
         files = {i: ChangeType.UNTRACTED for i in self._repository.untracked_files}
         changed_files = {f.a_path: ChangeType(f.change_type) for f in self._repository.index.diff(None)}
         files.update(changed_files)
-        return files
+        return {path: change for path, change in files.items() if not self._should_ignore_changed_file(path)}
+
+    @staticmethod
+    def _should_ignore_changed_file(path: str) -> bool:
+        parts = Path(path).as_posix().split("/")
+        ignored_dirs = {"node_modules", "dist", "__pycache__"}
+        if any(part in ignored_dirs for part in parts):
+            return True
+        return parts[-1] in {"package-lock.json", "npm-debug.log", "yarn-error.log"}
 
     @staticmethod
     def is_git_dir(local_path):

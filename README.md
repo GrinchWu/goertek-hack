@@ -145,6 +145,23 @@ AGENTDEV_MAX_TOKEN / OPENAI_MAX_TOKEN
 
 `METAGPT_MAX_TOKEN` 建议保持为 `12000` 或更高。`deepseek-v4-flash` 的返回中可能包含 reasoning tokens，如果仍使用 MetaGPT 默认 `4096`，复杂设计 JSON 容易被截断，导致 `JSONDecodeError: Unterminated string`。
 
+### 5.1 配置高级 DebugError 模型
+
+当同一个测试文件连续两次未通过时，`QaEngineer` 会让 `DebugError` 升级调用高级模型进行修复，修复后继续回到测试循环。默认高级模型配置为：
+
+```powershell
+$env:METAGPT_ADVANCED_MODEL="claude-opus-4-8"
+$env:METAGPT_ADVANCED_BASE_URL="https://api.xstx.info"
+$env:METAGPT_ADVANCED_API_KEY="你的高级模型 API Key"
+```
+
+如果不设置 `METAGPT_ADVANCED_API_KEY`，系统会降级使用当前主模型，不会直接中断流程。可选配置：
+
+```powershell
+$env:METAGPT_ADVANCED_MAX_TOKEN="12000"
+$env:METAGPT_QA_MAX_ROUNDS="12"
+```
+
 ## 6. 设置赛题输出根目录
 
 为了让生成结果输出到 `D:\goertek-hack`，设置：
@@ -311,7 +328,7 @@ max_tokens=800: 部分失败，finish_reason=length，说明 JSON 被截断
 | 多 Agent 协作 | 已支持 | 使用 MetaGPT 原生 `ProductManager / Architect / ProjectManager / Engineer / QaEngineer` |
 | 概要设计 Agent | 已支持 | `Architect + WriteDesign` 产出概要设计相关 JSON/Mermaid 文档 |
 | 代码生成 Agent | 已支持 | `Engineer + WriteCode` 产出 Node/React/CSV 示例系统源码 |
-| 单元测试 Agent | 已支持但有限制 | `QaEngineer` 会参与测试链路；JS 项目会补充静态结构验证测试 |
+| 单元测试 Agent | 已支持 | `QaEngineer` 会生成并运行多语言测试；连续失败两次后 `DebugError` 可升级到高级模型修复 |
 | 流程编排和依赖 | 已支持 | MetaGPT `Team` 自动编排，顺序推进各角色动作 |
 | 状态 JSON | 已支持 | `batch_status.json` 记录批次和节点状态 |
 | 执行日志 JSON | 已支持 | `execution_log.json` 记录节点开始、完成、失败和批次结束 |

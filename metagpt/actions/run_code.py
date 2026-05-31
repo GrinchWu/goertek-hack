@@ -15,6 +15,8 @@
             5. Merged the `Config` class of send18:dev branch to take over the set/get operations of the Environment
             class.
 """
+import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Tuple
@@ -100,7 +102,9 @@ class RunCode(Action):
         additional_python_paths = [working_directory] + additional_python_paths
         additional_python_paths = ":".join(additional_python_paths)
         env["PYTHONPATH"] = additional_python_paths + ":" + env.get("PYTHONPATH", "")
-        RunCode._install_dependencies(working_directory=working_directory, env=env)
+        RunCode._install_dependencies(working_directory=working_directory, env=env, command=command)
+        RunCode._prepare_node_path(working_directory=working_directory, env=env)
+        snapshot = RunCode._snapshot_workspace(working_directory)
 
         # Start the subprocess
         process = subprocess.Popen(
@@ -110,11 +114,13 @@ class RunCode(Action):
 
         try:
             # Wait for the process to complete, with a timeout
-            stdout, stderr = process.communicate(timeout=10)
+            stdout, stderr = process.communicate(timeout=RunCode._get_script_timeout())
         except subprocess.TimeoutExpired:
             logger.info("The command did not complete within the given timeout.")
             process.kill()  # Kill the process if it times out
             stdout, stderr = process.communicate()
+        finally:
+            RunCode._restore_workspace_snapshot(snapshot)
         if process.returncode:
             stderr = stderr + f"\nProcess exited with code {process.returncode}".encode("utf-8")
         return stdout.decode("utf-8"), stderr.decode("utf-8")
@@ -170,6 +176,99 @@ class RunCode(Action):
         RunCode._install_via_subprocess(install_pytest_command, check=True, cwd=working_directory, env=env)
 
     @staticmethod
-    def _install_dependencies(working_directory, env):
-        RunCode._install_requirements(working_directory, env)
-        RunCode._install_pytest(working_directory, env)
+    def _install_dependencies(working_directory, env, command=None):
+        command = command or []
+        executable = Path(command[0]).name.lower() if command else ""
+        if executable.startswith("python"):
+            RunCode._install_requirements(working_directory, env)
+            RunCode._install_pytest(working_directory, env)
+        if executable in {"node", "node.exe", "npm", "npm.cmd", "npx", "npx.cmd"}:
+            RunCode._install_node_dependencies(working_directory, env)
+
+    @staticmethod
+    def _install_node_dependencies(working_directory, env):
+        for package_json in RunCode._find_node_package_files(working_directory):
+            package_dir = package_json.parent
+            node_modules = package_dir / "node_modules"
+            if node_modules.exists():
+                continue
+            npm = RunCode._resolve_executable("npm", env)
+            if not npm:
+                logger.warning(f"npm executable not found; skip npm install for {package_dir}")
+                continue
+            install_command = [npm, "install"]
+            logger.info(f"{' '.join(install_command)} (cwd={package_dir})")
+            RunCode._install_via_subprocess(install_command, check=True, cwd=package_dir, env=env)
+
+    @staticmethod
+    def _resolve_executable(name, env):
+        candidates = [name]
+        if os.name == "nt" and not name.lower().endswith((".exe", ".cmd", ".bat")):
+            candidates = [f"{name}.cmd", f"{name}.exe", name]
+        for candidate in candidates:
+            resolved = shutil.which(candidate, path=env.get("PATH"))
+            if resolved:
+                return resolved
+        return None
+
+    @staticmethod
+    def _get_script_timeout():
+        try:
+            timeout = int(os.getenv("METAGPT_RUN_CODE_TIMEOUT", "30"))
+        except ValueError:
+            return 30
+        return max(timeout, 10)
+
+    @staticmethod
+    def _find_node_package_files(working_directory):
+        root = Path(working_directory)
+        ignored_dirs = {".git", "node_modules", "dist", "__pycache__"}
+        if not root.exists():
+            return []
+        packages = []
+        for package_json in root.rglob("package.json"):
+            if any(part in ignored_dirs for part in package_json.relative_to(root).parts):
+                continue
+            packages.append(package_json)
+        return packages
+
+    @staticmethod
+    def _prepare_node_path(working_directory, env):
+        node_paths = []
+        for package_json in RunCode._find_node_package_files(working_directory):
+            node_modules = package_json.parent / "node_modules"
+            if node_modules.exists():
+                node_paths.append(str(node_modules))
+        if not node_paths:
+            return
+        existing = env.get("NODE_PATH", "")
+        env["NODE_PATH"] = os.pathsep.join([*node_paths, existing] if existing else node_paths)
+
+    @staticmethod
+    def _snapshot_workspace(working_directory):
+        root = Path(working_directory)
+        ignored_dirs = {".git", "node_modules", "dist", "test_outputs", "__pycache__"}
+        snapshot = {}
+        if not root.exists():
+            return root, snapshot
+        for file_path in root.rglob("*"):
+            if not file_path.is_file():
+                continue
+            if any(part in ignored_dirs for part in file_path.relative_to(root).parts):
+                continue
+            try:
+                snapshot[file_path] = file_path.read_bytes()
+            except OSError:
+                continue
+        return root, snapshot
+
+    @staticmethod
+    def _restore_workspace_snapshot(snapshot):
+        _root, files = snapshot
+        for file_path, content in files.items():
+            try:
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                if not file_path.exists() or file_path.read_bytes() != content:
+                    file_path.write_bytes(content)
+            except OSError as err:
+                logger.warning(f"Failed to restore test-mutated file {file_path}: {err}")

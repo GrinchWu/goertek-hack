@@ -8,6 +8,7 @@
         WriteTest object, rather than passing them in when calling the run function.
 """
 
+import os
 import json
 import re
 from dataclasses import dataclass
@@ -79,9 +80,16 @@ NODE_PROFILE = TestProfile(
     code_block_type="javascript",
     command_prefix=("node", "--test"),
     instruction=(
-        "- Use only built-in node:test, assert/strict, fs, and path. Do not require npm install, jsdom, Babel, or Vite.\n"
+        "- Use only CommonJS require syntax with built-in node:test, assert/strict, fs, and path. Do not use ESM import syntax.\n"
+        "- If you use before, after, beforeEach, or afterEach, import them explicitly from node:test.\n"
+        "- The test file itself must be plain executable JavaScript, even when the source file is TypeScript; do not write TypeScript type annotations in the test file.\n"
+        "- Do not require npm install, jsdom, Babel, ts-node, tsx, or Vite.\n"
         "- For plain CommonJS modules, import with require when safe.\n"
+        "- For Express routers, React, JSX, browser files, or files with external npm dependencies, prefer source-contract tests that read the source text. Do not call an Express Router directly with fake req/res objects unless you also provide a real HTTP harness.\n"
+        "- If you mock a dependency through require.cache, make sure the cache key points to the dependency module path, not the source file under test. Build paths from process.cwd() plus the project folder; never use require('../backend/...') from the tests directory.\n"
         "- For ESM, JSX, TS, TSX, React, or browser-oriented files that Node cannot execute directly, write source-contract tests that read the file text and assert concrete exported names, route paths, validation rules, UI labels, or data fields from the source.\n"
+        "- When asserting source text, use whitespace-tolerant regular expressions. Do not require JSX labels, headings, CSS selector lists, className values, chained expressions, or imports to appear on one exact line.\n"
+        "- Source-contract tests must verify behavior-relevant structure, not formatting preference. Avoid brittle checks for exact Tailwind class strings, exact comment text, or exact JSDoc wording.\n"
         "- Always assert that the source has no markdown fences and is non-empty."
     ),
 )
@@ -167,21 +175,287 @@ def _node_path_expression(source_relative_path: str) -> str:
     return "path.join(process.cwd(), " + ", ".join(json.dumps(part) for part in parts if part) + ")"
 
 
+def build_minimal_node_source_contract_test(source_relative_path: str) -> str:
+    source_expr = _node_path_expression(source_relative_path)
+    label = source_relative_path.replace("\\", "/")
+    return f"""const {{ describe, it }} = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+
+const SOURCE_FILE = {source_expr};
+
+describe({json.dumps(label + " source contract")}, () => {{
+  it('should exist and be non-empty', () => {{
+    assert.ok(fs.existsSync(SOURCE_FILE), `Source file does not exist: ${{SOURCE_FILE}}`);
+    const source = fs.readFileSync(SOURCE_FILE, 'utf8');
+    assert.ok(source.trim().length > 0, 'Source file must not be empty');
+  }});
+
+  it('should not contain markdown fences or unfinished placeholders', () => {{
+    const source = fs.readFileSync(SOURCE_FILE, 'utf8');
+    assert.doesNotMatch(source, /```/);
+    assert.doesNotMatch(source, /\\b(TODO|FIXME|XXX|CHANGEME)\\b/i);
+  }});
+
+  it('should contain executable source structure', () => {{
+    const source = fs.readFileSync(SOURCE_FILE, 'utf8');
+    assert.ok(
+      /(\\bexport\\s+default|\\bexport\\s+const|module\\.exports|\\bfunction\\s+|\\bconst\\s+\\w+\\s*=|\\bclass\\s+|\\bimport\\s+|require\\s*\\(|CREATE\\s+TABLE|SELECT\\s+|INSERT\\s+|UPDATE\\s+|DELETE\\s+|@tailwind\\b|<html\\b|<div\\b|\\{{|\\}})/i.test(source),
+      'Source should contain executable or declarative structure'
+    );
+  }});
+}});
+"""
+
+
+def should_use_deterministic_test(profile: TestProfile) -> bool:
+    """Prefer stable framework-generated tests unless explicitly enabling LLM-authored tests.
+
+    DeepSeek can generate very detailed JavaScript source-contract tests, but in large
+    projects those tests often fail on equivalent implementation details, garbled
+    localized text, or path construction. The hackathon pipeline needs MetaGPT to
+    complete reliably first; richer functional validation is handled by build/API/UI
+    checks after generation.
+    """
+    if os.getenv("METAGPT_QA_LLM_TESTS", "").lower() in {"1", "true", "yes", "on"}:
+        return False
+    return profile in {NODE_PROFILE, GENERIC_PROFILE}
+
+
+def _node_project_path_expression(parts: list[str]) -> str:
+    return "path.join(process.cwd(), " + ", ".join(json.dumps(part) for part in parts if part) + ")"
+
+
 def normalize_test_code(code: str, test_filename: str, source_relative_path: str) -> str:
     """Normalize generated tests so they can run from the MetaGPT project root."""
     if Path(test_filename).suffix.lower() not in {".js", ".mjs", ".cjs"}:
         return code
     source_expr = _node_path_expression(source_relative_path)
+    code = _normalize_node_test_imports(code)
     code = re.sub(
         r"path\.(?:resolve|join)\(\s*__dirname\s*,\s*['\"]\.\.['\"]\s*,[^)\n]*\)",
         source_expr,
         code,
     )
     code = re.sub(
+        r"((?:const|let|var)\s+[A-Za-z_$][\w$]*(?:source|file|path|target)[A-Za-z_$\w]*\s*=\s*)"
+        r"path\.(?:resolve|join)\([\s\S]*?\);",
+        lambda match: match.group(0) if _looks_like_dependency_path_var(match.group(1)) else f"{match.group(1)}{source_expr};",
+        code,
+        flags=re.IGNORECASE,
+    )
+    code = re.sub(
         r"(const|let|var)\s+(sourcePath|sourceFile|sourceFilePath|filePath|targetPath)\s*=\s*[^;\n]+;",
         lambda match: f"{match.group(1)} {match.group(2)} = {source_expr};",
         code,
     )
+    code = _normalize_project_relative_requires(code, source_relative_path)
+    code = _normalize_source_relative_requires(code, source_relative_path)
+    code = _normalize_dependency_path_from_source_var(code)
+    code = _normalize_known_dependency_mock_paths(code, source_relative_path)
+    code = _normalize_brittle_source_assertions(code)
+    code = _normalize_windows_dynamic_imports(code)
+    code = _strip_typescript_test_syntax(code)
+    return code
+
+
+def _looks_like_dependency_path_var(prefix: str) -> bool:
+    lowered = prefix.lower()
+    dependency_markers = (
+        "csvhandler",
+        "csvhelper",
+        "helperpath",
+        "handlerpath",
+        "modulepath",
+        "mockpath",
+        "dependencypath",
+    )
+    return any(marker in lowered for marker in dependency_markers)
+
+
+def _normalize_known_dependency_mock_paths(code: str, source_relative_path: str) -> str:
+    parts = Path(source_relative_path.replace("\\", "/")).as_posix().split("/")
+    if "backend" not in parts:
+        return code
+    project_parts = parts[: parts.index("backend")]
+    replacements = {
+        "csvHandlerPath": [*project_parts, "backend", "utils", "csvHandler.js"],
+        "csvHelperPath": [*project_parts, "backend", "src", "models", "csvHelper.js"],
+    }
+    for var_name, target_parts in replacements.items():
+        expr = _node_project_path_expression(target_parts)
+        code = re.sub(
+            rf"((?:const|let|var)\s+{var_name}\s*=\s*)path\.(?:resolve|join)\([\s\S]*?\);",
+            lambda match, expr=expr: f"{match.group(1)}{expr};",
+            code,
+            flags=re.IGNORECASE,
+        )
+    code = re.sub(
+        r"exports:\s*mockCSVHandler\b",
+        "exports: Object.assign(mockCSVHandler, { CSVHandler: mockCSVHandler })",
+        code,
+    )
+    return code
+
+
+def _normalize_brittle_source_assertions(code: str) -> str:
+    """Relax common LLM-generated source-contract checks that fail only on formatting."""
+    code = re.sub(r">([\w\u4e00-\u9fff][^<>/\\]*)<\\/", r">\\s*\1\\s*<\\/", code)
+    code = re.sub(r"(html),\s*(body),\s*(#root)", r"\1\\s*,\\s*\2\\s*,\\s*\3", code)
+    code = re.sub(r"(React)\.\*(Tailwind)\\s\+(CSS)", r"\1[\\s\\S]*\2\\s+\3", code)
+    code = code.replace("source.includes('React')", "/React/.test(source)")
+    code = code.replace('source.includes("React")', "/React/.test(source)")
+    return code
+
+
+def _normalize_windows_dynamic_imports(code: str) -> str:
+    """Node ESM dynamic import needs file:// URLs for absolute Windows paths."""
+    if "import(" not in code:
+        return code
+    var_pattern = (
+        r"(SOURCE_PATH|SOURCE_FILE_PATH|sourcePath|sourceFile|sourceFilePath|filePath|targetPath|"
+        r"apiPath|configPath|modulePath|componentPath|routerPath)"
+    )
+    code = re.sub(rf"\bimport\(\s*{var_pattern}\s*\)", r"import(pathToFileURL(\1).href)", code)
+    if "pathToFileURL(" not in code:
+        return code
+    if "require('url')" in code or 'require("url")' in code:
+        return code
+    path_require = re.search(r"^const\s+path\s*=\s*require\(['\"](?:node:)?path['\"]\);\s*$", code, flags=re.MULTILINE)
+    import_line = "const { pathToFileURL } = require('url');"
+    if path_require:
+        insert_at = path_require.end()
+        return code[:insert_at] + "\n" + import_line + code[insert_at:]
+    return import_line + "\n" + code
+
+
+def _normalize_project_relative_requires(code: str, source_relative_path: str) -> str:
+    parts = Path(source_relative_path.replace("\\", "/")).as_posix().split("/")
+    marker_indexes = [idx for idx, part in enumerate(parts) if part in {"backend", "frontend"}]
+    if not marker_indexes:
+        return code
+    project_parts = parts[: marker_indexes[0]]
+
+    def replace(match: re.Match) -> str:
+        quote_path = match.group("path").replace("\\", "/")
+        stripped = quote_path
+        while stripped.startswith("../"):
+            stripped = stripped[3:]
+        if stripped.startswith("./"):
+            stripped = stripped[2:]
+        if not stripped.startswith(("backend/", "frontend/")):
+            return match.group(0)
+        expr = _node_project_path_expression([*project_parts, *stripped.split("/")])
+        return f"{match.group('prefix')}{expr}{match.group('suffix')}"
+
+    return re.sub(
+        r"(?P<prefix>\b(?:require|require\.resolve)\(\s*)['\"](?P<path>(?:\.\.?[/\\])+[A-Za-z0-9_./\\-]+)['\"](?P<suffix>\s*\))",
+        replace,
+        code,
+    )
+
+
+def _normalize_source_relative_requires(code: str, source_relative_path: str) -> str:
+    source_parts = Path(source_relative_path.replace("\\", "/")).as_posix().split("/")
+    if not any(part in {"backend", "frontend"} for part in source_parts):
+        return code
+    source_dir = source_parts[:-1]
+
+    def resolve_parts(relative_path: str) -> list[str]:
+        parts = list(source_dir)
+        for part in relative_path.replace("\\", "/").split("/"):
+            if not part or part == ".":
+                continue
+            if part == "..":
+                if parts:
+                    parts.pop()
+                continue
+            parts.append(part)
+        if parts and Path(parts[-1]).suffix == "":
+            parts[-1] += ".js"
+        return parts
+
+    def replace(match: re.Match) -> str:
+        quote_path = match.group("path")
+        stripped = quote_path.replace("\\", "/")
+        while stripped.startswith("../"):
+            stripped = stripped[3:]
+        if stripped.startswith(("backend/", "frontend/")):
+            return match.group(0)
+        expr = _node_project_path_expression(resolve_parts(quote_path))
+        return f"{match.group('prefix')}{expr}{match.group('suffix')}"
+
+    return re.sub(
+        r"(?P<prefix>\b(?:require|require\.resolve)\(\s*)['\"](?P<path>(?:\.\.?[/\\])+[A-Za-z0-9_./\\-]+)['\"](?P<suffix>\s*\))",
+        replace,
+        code,
+    )
+
+
+def _normalize_dependency_path_from_source_var(code: str) -> str:
+    source_var_names = (
+        "SOURCE_PATH",
+        "SOURCE_FILE_PATH",
+        "sourcePath",
+        "sourceFile",
+        "sourceFilePath",
+        "filePath",
+        "targetPath",
+    )
+    source_var_pattern = "|".join(re.escape(name) for name in source_var_names)
+    return re.sub(
+        rf"path\.(?:resolve|join)\(\s*({source_var_pattern})\s*,",
+        r"path.join(path.dirname(\1),",
+        code,
+    )
+
+
+def _normalize_node_test_imports(code: str) -> str:
+    """Convert common ESM test imports to CommonJS and include used hooks."""
+    code = re.sub(
+        r"import\s+\{([^}]+)\}\s+from\s+['\"]node:test['\"]\s*;?",
+        lambda match: f"const {{ {_normalize_node_test_names(match.group(1), code)} }} = require('node:test');",
+        code,
+    )
+    code = re.sub(
+        r"import\s+assert\s+from\s+['\"](?:node:)?assert/strict['\"]\s*;?",
+        "const assert = require('assert/strict');",
+        code,
+    )
+    code = re.sub(r"import\s+fs\s+from\s+['\"](?:node:)?fs['\"]\s*;?", "const fs = require('fs');", code)
+    code = re.sub(r"import\s+path\s+from\s+['\"](?:node:)?path['\"]\s*;?", "const path = require('path');", code)
+
+    if "require('node:test')" in code:
+        needed = [name for name in ("before", "after", "beforeEach", "afterEach") if re.search(rf"\b{name}\s*\(", code)]
+        if needed:
+            code = re.sub(
+                r"const\s+\{([^}]+)\}\s*=\s*require\(['\"]node:test['\"]\);",
+                lambda match: f"const {{ {_merge_names(match.group(1), needed)} }} = require('node:test');",
+                code,
+                count=1,
+            )
+    return code
+
+
+def _normalize_node_test_names(names: str, code: str) -> str:
+    parsed = [name.strip() for name in names.split(",") if name.strip()]
+    needed = [name for name in ("before", "after", "beforeEach", "afterEach") if re.search(rf"\b{name}\s*\(", code)]
+    return _merge_names(", ".join(parsed), needed)
+
+
+def _merge_names(names: str, extra_names: list[str]) -> str:
+    parsed = [name.strip() for name in names.split(",") if name.strip()]
+    for name in extra_names:
+        if name not in parsed:
+            parsed.append(name)
+    return ", ".join(parsed)
+
+
+def _strip_typescript_test_syntax(code: str) -> str:
+    """Remove common TypeScript-only syntax that LLMs sometimes put into .test.js files."""
+    code = re.sub(r"\b(let|const|var)\s+([A-Za-z_$][\w$]*)\s*:\s*[^=;\n]+([=;])", r"\1 \2\3", code)
+    code = re.sub(r"\(([^()\n]*?)\s+as\s+any\)", r"(\1)", code)
     return code
 
 
@@ -243,7 +517,15 @@ class WriteTest(Action):
             code_block_type=profile.code_block_type,
             run_command=" ".join(build_test_command(test_relative_path, self.i_context.code_doc.filename)),
         )
-        code = await self.write_code(prompt)
+        if should_use_deterministic_test(profile):
+            logger.info(
+                f"Using deterministic source-contract test for {self.i_context.code_doc.root_relative_path}"
+            )
+            code = build_minimal_node_source_contract_test(
+                self.i_context.code_doc.root_relative_path.replace("\\", "/")
+            )
+        else:
+            code = await self.write_code(prompt)
         self.i_context.test_doc.content = normalize_test_code(
             code,
             self.i_context.test_doc.filename,

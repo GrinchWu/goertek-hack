@@ -15,6 +15,7 @@
     of SummarizeCode.
 """
 import re
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -48,8 +49,9 @@ class QaEngineer(Role):
         "The test code you write should conform to code standard like PEP8, be modular, easy to read and maintain."
         "Use same language as user requirement"
     )
-    test_round_allowed: int = 5
+    test_round_allowed: int = 12
     test_round: int = 0
+    test_failures_by_file: dict[str, int] = Field(default_factory=dict)
     repo: Optional[ProjectRepo] = Field(default=None, exclude=True)
     input_args: Optional[BaseModel] = Field(default=None, exclude=True)
 
@@ -62,6 +64,7 @@ class QaEngineer(Role):
         self.set_actions([WriteTest])
         self._watch([SummarizeCode, WriteTest, RunCode, DebugError])
         self.test_round = 0
+        self.test_round_allowed = int(os.getenv("METAGPT_QA_MAX_ROUNDS", str(self.test_round_allowed)))
 
     @staticmethod
     def _is_run_result_passed(result: RunCodeResult) -> bool:
@@ -167,7 +170,11 @@ class QaEngineer(Role):
         run_code_context.code = None
         run_code_context.test_code = None
         if self._is_run_result_passed(result):
+            self.test_failures_by_file.pop(run_code_context.test_filename, None)
             return
+        self.test_failures_by_file[run_code_context.test_filename] = (
+            self.test_failures_by_file.get(run_code_context.test_filename, 0) + 1
+        )
         # the recipient might be Engineer or myself
         recipient = parse_recipient(result.summary)
         mappings = {"Engineer": "Alex", "QaEngineer": "Edward"}
@@ -196,8 +203,19 @@ class QaEngineer(Role):
 
     async def _debug_error(self, msg):
         run_code_context = RunCodeContext.loads(msg.content)
+        failure_count = self.test_failures_by_file.get(run_code_context.test_filename, 0)
+        use_advanced_model = failure_count >= 2
+        if use_advanced_model:
+            logger.info(
+                f"{run_code_context.test_filename} failed {failure_count} times; escalating DebugError to advanced model."
+            )
         code = await DebugError(
-            i_context=run_code_context, repo=self.repo, input_args=self.input_args, context=self.context, llm=self.llm
+            i_context=run_code_context,
+            repo=self.repo,
+            input_args=self.input_args,
+            context=self.context,
+            llm=self.llm,
+            use_advanced_model=use_advanced_model,
         ).run()
         if not code:
             return

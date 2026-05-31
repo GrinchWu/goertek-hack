@@ -114,6 +114,11 @@ class Engineer(Role):
         m = json.loads(task_msg.content)
         return m.get(TASK_LIST.key) or m.get(REFINED_TASK_LIST.key)
 
+    @staticmethod
+    def _json_doc_paths(filenames: list[str]) -> list[str]:
+        """Keep machine-readable task/design docs and ignore resource renderings."""
+        return [i for i in filenames if Path(i).suffix.lower() == ".json"]
+
     async def _act_sp_with_cr(self, review=False) -> Set[str]:
         changed_files = set()
         for todo in self.code_todos:
@@ -349,33 +354,35 @@ class Engineer(Role):
         changed_files = Documents()
         # Recode caused by upstream changes.
         if hasattr(self.input_args, "changed_task_filenames"):
-            changed_task_filenames = self.input_args.changed_task_filenames
+            changed_task_filenames = self._json_doc_paths(self.input_args.changed_task_filenames)
         else:
-            changed_task_filenames = [
+            changed_task_filenames = self._json_doc_paths([
                 str(self.repo.docs.task.workdir / i) for i in list(self.repo.docs.task.changed_files.keys())
-            ]
+            ])
         for filename in changed_task_filenames:
             task_filename = Path(filename)
             design_filename = None
             if hasattr(self.input_args, "changed_system_design_filenames"):
-                changed_system_design_filenames = self.input_args.changed_system_design_filenames
+                changed_system_design_filenames = self._json_doc_paths(self.input_args.changed_system_design_filenames)
             else:
-                changed_system_design_filenames = [
+                changed_system_design_filenames = self._json_doc_paths([
                     str(self.repo.docs.system_design.workdir / i)
                     for i in list(self.repo.docs.system_design.changed_files.keys())
-                ]
+                ])
             for i in changed_system_design_filenames:
                 if task_filename.name == Path(i).name:
                     design_filename = Path(i)
                     break
             code_plan_and_change_filename = None
             if hasattr(self.input_args, "changed_code_plan_and_change_filenames"):
-                changed_code_plan_and_change_filenames = self.input_args.changed_code_plan_and_change_filenames
+                changed_code_plan_and_change_filenames = self._json_doc_paths(
+                    self.input_args.changed_code_plan_and_change_filenames
+                )
             else:
-                changed_code_plan_and_change_filenames = [
+                changed_code_plan_and_change_filenames = self._json_doc_paths([
                     str(self.repo.docs.code_plan_and_change.workdir / i)
                     for i in list(self.repo.docs.code_plan_and_change.changed_files.keys())
-                ]
+                ])
             for i in changed_code_plan_and_change_filenames:
                 if task_filename.name == Path(i).name:
                     code_plan_and_change_filename = Path(i)

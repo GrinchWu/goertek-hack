@@ -17,6 +17,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -86,6 +87,11 @@ ATTENTION: Use '##' to SPLIT SECTIONS, not '#'. Output format carefully referenc
 5. CAREFULLY CHECK THAT YOU DONT MISS ANY NECESSARY CLASS/FUNCTION IN THIS FILE.
 6. Before using a external variable/module, make sure you import it first.
 7. Write out EVERY CODE DETAIL, DON'T LEAVE TODO.
+8. Frontend quality bar: If this file is part of a frontend, implement the actual usable application screen, not a marketing page. Keep the UI quiet, work-focused, responsive, and consistent; include real navigation, forms, validation, loading/error/empty states, admin/user workflows when relevant, accessible labels, and stable layouts. Prefer one coherent styling approach such as Tailwind CSS; avoid decorative-only gradients, nested cards, placeholder text, and unfinished mock content.
+9. Full-stack completeness bar: Required behavior must be working local code. Do not leave TODOs, placeholders, demo-only branches, simplified stubs, fake success responses, or "future extension" notes for authentication, admin/user workflows, CSV persistence, payment simulation, or external-system simulation when the requirement asks for them. If this is a package/config file, include every script and dependency needed to install, test, build, and run the generated project.
+10. JavaScript module consistency: For Vite/React frontends, either set `"type": "module"` in `frontend/package.json` when using `import`/`export` syntax in `vite.config.js`, `tailwind.config.js`, or `postcss.config.js`, or write those config files as CommonJS. The generated frontend must pass `npm run build` without module-format errors.
+11. Frontend import/export consistency: When React components import named symbols such as contexts, hooks, API helpers, or utilities, the defining file must export those exact names. Keep context value names consistent across all consumers, for example do not mix `addToast` and `showToast` unless both are provided.
+12. CommonJS import/export consistency: If backend modules are consumed with named destructuring such as `const {{ CSVHelper }} = require('../models/csvHelper')` or `const {{ CSVHandler }} = require('../utils/csvHandler')`, the required module must expose that named property. Prefer exporting both the default value and the named property for shared utilities when in doubt.
 
 """
 
@@ -160,6 +166,7 @@ class WriteCode(Action):
         async with EditorReporter(enable_llm_stream=True) as reporter:
             await reporter.async_report({"type": "code", "filename": coding_context.filename}, "meta")
             code = await self.write_code(prompt)
+            code = self._normalize_generated_code(coding_context.filename, code)
             if not coding_context.code_doc:
                 # avoid root_path pydantic ValidationError if use WriteCode alone
                 coding_context.code_doc = Document(
@@ -168,6 +175,70 @@ class WriteCode(Action):
             coding_context.code_doc.content = code
             await reporter.async_report(coding_context.code_doc, "document")
         return coding_context
+
+    @staticmethod
+    def _normalize_generated_code(filename: str, code: str) -> str:
+        """Apply narrow, deterministic repairs for common cross-file JS generation mistakes."""
+        suffix = Path(filename).suffix.lower()
+        if suffix == ".csv":
+            return code if code.endswith("\n") else code + "\n"
+
+        if suffix not in {".md", ".markdown"}:
+            code = WriteCode._strip_markdown_code_wrapper(code)
+
+        if suffix not in {".js", ".jsx", ".ts", ".tsx"}:
+            return code
+
+        for context_name in ("AuthContext", "AppContext"):
+            if re.search(rf"\bconst\s+{context_name}\s*=\s*createContext\b", code) and not re.search(
+                rf"\bexport\s+const\s+{context_name}\b", code
+            ):
+                code = re.sub(rf"\bconst\s+{context_name}\b", f"export const {context_name}", code, count=1)
+
+        if "axios.create" in code and re.search(r"\bconst\s+api\s*=", code) and not re.search(r"\bexport\s+const\s+api\b", code):
+            code = re.sub(r"\bconst\s+api\s*=", "export const api =", code, count=1)
+        if Path(filename).as_posix().lower().endswith("csvhandler.js"):
+            code = WriteCode._normalize_csv_handler_commonjs_export(code)
+        if Path(filename).as_posix().lower().endswith("csvhelper.js"):
+            code = WriteCode._normalize_csv_helper_commonjs_export(code)
+        return code
+
+    @staticmethod
+    def _normalize_csv_handler_commonjs_export(code: str) -> str:
+        if not re.search(r"\bclass\s+CSVHandler\b", code):
+            return code
+        if re.search(r"module\.exports\.CSVHandler\s*=", code):
+            return code
+        return re.sub(
+            r"module\.exports\s*=\s*CSVHandler\s*;?",
+            "module.exports = CSVHandler;\nmodule.exports.CSVHandler = CSVHandler;",
+            code,
+            count=1,
+        )
+
+    @staticmethod
+    def _normalize_csv_helper_commonjs_export(code: str) -> str:
+        if not re.search(r"\bmodule\.exports\s*=", code):
+            return code
+        if re.search(r"module\.exports\.CSVHelper\s*=", code):
+            return code
+        if not re.search(r"\b(readCSV|writeCSV|appendCSV|updateCSV)\b", code):
+            return code
+        return code.rstrip() + "\nmodule.exports.CSVHelper = module.exports;\n"
+
+    @staticmethod
+    def _strip_markdown_code_wrapper(code: str) -> str:
+        """Recover raw source if the model returned a markdown section despite the prompt."""
+        if "```" not in code:
+            return code
+        matches = re.findall(r"```(?:[a-z0-9_+-]+)?\s*\n(.*?)\n```", code, flags=re.DOTALL | re.IGNORECASE)
+        if matches:
+            code = max(matches, key=len).strip()
+        lines = code.splitlines()
+        while lines and (not lines[0].strip() or lines[0].lstrip().startswith("##")):
+            lines.pop(0)
+        cleaned = [line for line in lines if not line.strip().startswith("```")]
+        return "\n".join(cleaned).strip() + ("\n" if cleaned else "")
 
     @staticmethod
     def _get_int_env(name: str, default: int) -> int:

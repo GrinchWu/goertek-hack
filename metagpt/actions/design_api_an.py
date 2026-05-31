@@ -13,7 +13,9 @@ from metagpt.utils.mermaid import MMC1, MMC2
 IMPLEMENTATION_APPROACH = ActionNode(
     key="Implementation approach",
     expected_type=str,
-    instruction="Analyze the difficult points of the requirements, select the appropriate open-source framework.",
+    instruction="Analyze the difficult points of the requirements, select the appropriate open-source framework. "
+    "For frontend work, choose one coherent UI stack and design complete operational screens with responsive layouts, "
+    "real workflows, validation, loading/error/empty states, and admin/user views when required.",
     example="We will ...",
 )
 
@@ -33,7 +35,7 @@ PROJECT_NAME = ActionNode(
 FILE_LIST = ActionNode(
     key="File list",
     expected_type=List[str],
-    instruction="Only need relative paths. Succinctly designate the correct entry file for your project based on the programming language: use main.js for JavaScript, main.py for Python, and so on for other languages.",
+    instruction="Only need relative paths. Succinctly designate the correct entry file for your project based on the programming language: use main.js for JavaScript, main.py for Python, and so on for other languages. Keep frontend and backend files consistent with one chosen architecture; do not include competing duplicate stacks. For a full-stack web application, use one clear `backend/` plus `frontend/` layout, include runtime manifests/configs such as `backend/package.json`, `frontend/package.json`, `frontend/vite.config.js`, `frontend/tailwind.config.js`, `frontend/postcss.config.js`, `frontend/src/index.css`, and include required seed data files. Do not add a competing root-level `src/`, `routes/`, `models/`, or `server` stack when `backend/` and `frontend/` are used.",
     example=["a.js", "b.py", "c.css", "d.html"],
 )
 

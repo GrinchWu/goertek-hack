@@ -19,8 +19,8 @@ LANGUAGE = ActionNode(
 PROGRAMMING_LANGUAGE = ActionNode(
     key="Programming Language",
     expected_type=str,
-    instruction="Mainstream programming language. If not specified in the requirements, use Vite, React, MUI, Tailwind CSS.",
-    example="Vite, React, MUI, Tailwind CSS",
+    instruction="Mainstream programming language. If not specified in the requirements, use Vite, React, Tailwind CSS, and Node.js/Express for full-stack web applications. Avoid mixing multiple frontend UI frameworks unless explicitly required. The selected stack must be able to implement all required frontend, backend, CSV persistence, authentication, and simulated external-system workflows without demo-only or placeholder features.",
+    example="Vite, React, Tailwind CSS, Node.js, Express",
 )
 
 ORIGINAL_REQUIREMENTS = ActionNode(
@@ -157,8 +157,8 @@ REFINED_REQUIREMENT_POOL = ActionNode(
 UI_DESIGN_DRAFT = ActionNode(
     key="UI Design draft",
     expected_type=str,
-    instruction="Provide a simple description of UI elements, functions, style, and layout.",
-    example="Basic function description with a simple style and layout.",
+    instruction="Provide a concrete operational UI design, not a landing page. Describe the primary screens, navigation, data tables, forms, validation, loading/error/empty states, responsive behavior, admin/user views, and a consistent restrained visual system suitable for repeated business use.",
+    example="A work-focused dashboard with top navigation, reservation form, status table, admin configuration panel, validation feedback, loading skeletons, empty states, and responsive mobile stacking.",
 )
 
 ANYTHING_UNCLEAR = ActionNode(
